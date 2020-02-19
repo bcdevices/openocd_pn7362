@@ -29,11 +29,11 @@
 
 //temporarily turn off nags during port, todo tidy and remove these
 #pragma GCC diagnostic ignored  "-Wall"
-#pragma GCC diagnostic ignored  "-Wunused-function"
-#pragma GCC diagnostic ignored  "-Wunused-variable"
-#pragma GCC diagnostic ignored  "-Wunused-but-set-variable"
-#pragma GCC diagnostic ignored  "-Wunused-label"
-//
+//#pragma GCC diagnostic ignored  "-Wunused-function"
+//#pragma GCC diagnostic ignored  "-Wunused-variable"
+//#pragma GCC diagnostic ignored  "-Wunused-but-set-variable"
+//#pragma GCC diagnostic ignored  "-Wunused-label"
+
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -78,6 +78,8 @@
 #define PN74_FLASH_START PH_ROMHAL_FLASH_START_ADDRESS
 #define PN74_FLASH_SIZE  PH_ROMHAL_FLASH_SIZE
 
+#define PN73_FLASH_REGISTER_BASE 0x00200000
+
 
 /* timeout values */
 
@@ -88,13 +90,10 @@
 struct pn73x_flash_bank {
 	int ppage_size;
 	int probed;
-
-	int user_data_offset;
-	int option_offset;
 	uint32_t user_bank_size;
 };
 
-static int pn73x_mass_erase(struct flash_bank *bank);
+//static int pn73x_mass_erase(struct flash_bank *bank);
 static int pn73x_get_device_id(struct flash_bank *bank, uint32_t *device_id);
 static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 		uint32_t address, uint32_t count);
@@ -117,70 +116,31 @@ FLASH_BANK_COMMAND_HANDLER(pn73x_flash_bank_command)
 	return ERROR_OK;
 }
 
-static inline int pn73x_get_flash_reg(struct flash_bank *bank, uint32_t reg)
-{
-//	struct pn73x_flash_bank *pn73x_info = bank->driver_priv;
-	return 0; //reg + pn73x_info->register_base;
-}
-
-static inline int pn73x_get_flash_status(struct flash_bank *bank, uint32_t *status)
-{
-//	struct target *target = bank->target;
-//	return target_read_u32(target, pn73x_get_flash_reg(bank, pn73_FLASH_SR), status);
-	return 0; //target_read_u32(target, pn73x_get_flash_reg(bank, pn73_FLASH_SR), status);
-}
-
-static int pn73x_wait_status_busy(struct flash_bank *bank, int timeout)
-{
-//	struct target *target = bank->target;
-//	uint32_t status;
-	int retval = ERROR_OK;
-	return retval;
-}
-
-static int pn73x_check_operation_supported(struct flash_bank *bank)
-{
-	struct pn73x_flash_bank *pn73x_info = bank->driver_priv;
-	return ERROR_OK;
-}
-
-
 static int pn73x_protect_check(struct flash_bank *bank)
 {
-	struct target *target = bank->target;
-	uint32_t protection;
-
-	int retval = pn73x_check_operation_supported(bank);
-	if (ERROR_OK != retval)
-		return retval;
-
 	return ERROR_OK;
 }
 
 static int pn73x_erase(struct flash_bank *bank, int first, int last)
 {
-
 	return ERROR_OK;
 }
 
 static int pn73x_protect(struct flash_bank *bank, int set, int first, int last)
 {
-	struct target *target = bank->target;
-	struct pn73x_flash_bank *pn73x_info = bank->driver_priv;
-
-	return 0; //pn73x_write_options(bank);
+	return ERROR_OK;
 }
 
+/* NOTE the count must be multiple of 4 bytes, and address on 4 byte boundary */
 static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 		uint32_t address, uint32_t count)
 {
 	struct target *target = bank->target;
-	uint32_t buffer_size = PN73_BUFFER_SIZE;
+	uint32_t buffer_size = PN73_BUFFER_SIZE+12;  /* +12 makes the actual target data buffer itself a nice round size (4096 bytes) */
 	struct working_area *write_algorithm;
 	struct working_area *source;
 	//uint32_t address = bank->base + offset;
-	struct mem_param mem_params[4];
-	struct reg_param reg_params[1];
+	struct reg_param reg_params[5];
 	struct armv7m_algorithm armv7m_info;
 	int retval = ERROR_OK;
 
@@ -189,7 +149,7 @@ static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 	{
 		//Compiled from BCFlashStub project. This does not support async write mode but it wouldn't be too hard to add
 		//the stub could be implemented in assembler much like the other OpenOCD ones, this is not part of basic functionality
-#include "../../../contrib/loaders/flash/pn73xxxx.inc"
+#include "../../../contrib/loaders/flash/pn73xxxx/pn7xxxx.inc"
 	};
 
 	/* flash write code */
@@ -221,60 +181,42 @@ static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 	armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
 	armv7m_info.core_mode = ARM_MODE_THREAD;
 
-	//need to have a valid stack as this is compiled C, unlike most of the provided ones
-	init_reg_param(&reg_params[0], "sp", 32, PARAM_OUT);
+	init_reg_param(&reg_params[0], "r0", 32, PARAM_IN_OUT);	/* flash base (in), status (out) */
+	init_reg_param(&reg_params[1], "r1", 32, PARAM_OUT);	/* count (bytes) */
+	init_reg_param(&reg_params[2], "r2", 32, PARAM_OUT);	/* buffer start */
+	init_reg_param(&reg_params[3], "r3", 32, PARAM_OUT);	/* buffer end */
+	init_reg_param(&reg_params[4], "r4", 32, PARAM_IN_OUT);	/* target address */
 
-	init_mem_param(&mem_params[0], PN73_OCDInfo+ 0x0, 4, PARAM_IN_OUT);
-	init_mem_param(&mem_params[1], PN73_OCDInfo+ 0x4, 4, PARAM_OUT);
-	init_mem_param(&mem_params[2], PN73_OCDInfo+ 0x8, 4, PARAM_OUT);
+	buf_set_u32(reg_params[0].value, 0, 32, PN73_FLASH_REGISTER_BASE);
+	buf_set_u32(reg_params[1].value, 0, 32, count<<1);
+	buf_set_u32(reg_params[2].value, 0, 32, source->address);
+	buf_set_u32(reg_params[3].value, 0, 32, source->address + source->size);
+	buf_set_u32(reg_params[4].value, 0, 32, address);
 
-	while (count > 0) {
-		uint32_t thisrun_count = (count > (buffer_size / 2)) ?
-			(buffer_size / 2) : count;
+	armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
+	armv7m_info.core_mode = ARM_MODE_THREAD;
 
-		retval = target_write_buffer(target, source->address, thisrun_count * 2, buffer);
-		if (retval != ERROR_OK)
-			break;
+	retval = target_run_flash_async_algorithm(target, buffer,
+			count/2, 4,	//block count, block size
+			0, NULL,	//mem params
+			5, reg_params, //reg params
+			source->address, source->size,
+			write_algorithm->address, 0,
+			&armv7m_info);
 
-		buf_set_u32(reg_params[0].value, 0, 32, PN73_STACK);
-
-		buf_set_u32(mem_params[0].value, 0, 32, source->address);
-		buf_set_u32(mem_params[1].value, 0, 32, address);
-		buf_set_u32(mem_params[2].value, 0, 32, thisrun_count*2);
-
-		retval = target_run_algorithm(target,  
-			3, mem_params,
-			1, reg_params,
-			write_algorithm->address, 0, 10000, &armv7m_info);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("error executing pn73xxxx flash write algorithm");
-			break;
-		}
-		{
-			uint32_t stubCode=buf_get_u32(mem_params[0].value, 0, 32);
-			LOG_INFO("stub returned =\t0x%08x", stubCode);
-
-			if (stubCode !=1 ) {
-				LOG_ERROR("error writing to flash");
-				/* Clear but report errors */
-				retval = ERROR_FAIL;
-				break;
-			}
-
-		}
-
-		buffer += thisrun_count * 2;
-		address += thisrun_count * 2;
-		count -= thisrun_count;
+	if (retval == ERROR_FLASH_OPERATION_FAILED) {
+		LOG_ERROR("flash write failed at address 0x%"PRIx32,
+				buf_get_u32(reg_params[4].value, 0, 32));
 	}
+
+	destroy_reg_param(&reg_params[0]);
+	destroy_reg_param(&reg_params[1]);
+	destroy_reg_param(&reg_params[2]);
+	destroy_reg_param(&reg_params[3]);
+	destroy_reg_param(&reg_params[4]);
 
 	target_free_working_area(target, source);
 	target_free_working_area(target, write_algorithm);
-
-	destroy_mem_param(&mem_params[0]);
-	destroy_mem_param(&mem_params[1]);
-	destroy_mem_param(&mem_params[2]);
-	destroy_reg_param(&reg_params[0]);
 
 	return retval;
 }
@@ -286,7 +228,6 @@ static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 static int pn73x_write(struct flash_bank *bank, const uint8_t *buffer,
 		uint32_t offset, uint32_t count)
 {
-	struct target *target = bank->target;
 	uint8_t *new_buffer = NULL;
 
 	if (bank->target->state != TARGET_HALTED) {
@@ -294,35 +235,31 @@ static int pn73x_write(struct flash_bank *bank, const uint8_t *buffer,
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
-	if (offset & 0x1) {
-		LOG_ERROR("offset 0x%" PRIx32 " breaks required 2-byte alignment", offset);
+	if (offset & 0x3) {
+		LOG_ERROR("offset 0x%" PRIx32 " breaks required 4-byte alignment", offset);
 		return ERROR_FLASH_DST_BREAKS_ALIGNMENT;
 	}
 
-	/* If there's an odd number of bytes, the data has to be padded. Duplicate
-	 * the buffer and use the normal code path with a single block write since
-	 * it's probably cheaper than to special case the last odd write using
-	 * discrete accesses. */
-	if (count & 1) {
-		new_buffer = malloc(count + 1);
+	/* pad to nearest 4 bytes */
+	if (count & 3) {
+		new_buffer = malloc((count + 3) & 0xfffffffc);
 		if (new_buffer == NULL) {
-			LOG_ERROR("odd number of bytes to write and no memory for padding buffer");
+			LOG_ERROR("need to pad, and no memory for padding buffer");
 			return ERROR_FAIL;
 		}
-		LOG_INFO("odd number of bytes to write, padding with 0xff");
+		LOG_INFO("padding with 0xff");
 		buffer = memcpy(new_buffer, buffer, count);
-		new_buffer[count++] = 0xff;
+		while(count & 3){
+			new_buffer[count++] = 0xff;
+		}
 	}
 
 	uint32_t words_remaining = count / 2;
 	int retval;
 
-
 	/* try using a block write */
 	retval = pn73x_write_block(bank, buffer, bank->base + offset, words_remaining);
 
-reset_pg_and_lock:
-cleanup:
 	if (new_buffer)
 		free(new_buffer);
 
@@ -334,7 +271,7 @@ static int pn73x_get_device_id(struct flash_bank *bank, uint32_t *device_id)
 	/* This check the device CPUID core register*/
 
 	struct target *target = bank->target;
-	uint32_t cpuid, device_id_register = 0;
+	uint32_t cpuid;
 
 	/* Get the CPUID from the ARM Core
 	 * http://infocenter.arm.com/help/topic/com.arm.doc.ddi0432c/DDI0432C_cortex_m0_r0p0_trm.pdf 4.2.1 */
@@ -364,17 +301,15 @@ static int pn73x_get_flash_size(struct flash_bank *bank, uint16_t *flash_size_in
 
 static int pn73x_probe(struct flash_bank *bank)
 {
+	// This is a bit untidy
 	struct pn73x_flash_bank *pn73x_info = bank->driver_priv;
 	uint16_t flash_size_in_kb;
-	uint16_t max_flash_size_in_kb;
 	uint32_t device_id;
 	int page_size;
 	uint32_t base_address = PN74_FLASH_START;
 	
 	pn73x_info->probed = 0;
-	pn73x_info->user_data_offset = 10;
-	pn73x_info->option_offset = 0;
-
+	
 
 	/* read pn73 device id register */
 	int retval = pn73x_get_device_id(bank, &device_id);
@@ -383,12 +318,10 @@ static int pn73x_probe(struct flash_bank *bank)
 
 	LOG_INFO("device id = 0x%08" PRIx32 "", device_id);
 
-	/* set page size, protection granularity and max flash size depending on family */
 	switch (device_id & 0xfff) {
 	case 0:
 		page_size = 1024;
 		pn73x_info->ppage_size = 4;
-		max_flash_size_in_kb = 256;
 		break;
 	
 
@@ -453,41 +386,17 @@ static int get_pn73x_info(struct flash_bank *bank, char *buf, int buf_size)
 	return ERROR_OK;
 }
 
+#if 0
 COMMAND_HANDLER(pn73x_handle_lock_command)
 {
-	struct target *target = NULL;
-	struct pn73x_flash_bank *pn73x_info = NULL;
-
-	if (CMD_ARGC < 1)
-		return ERROR_COMMAND_SYNTAX_ERROR;
 	return ERROR_OK;
 }
 
 COMMAND_HANDLER(pn73x_handle_unlock_command)
 {
-	struct target *target = NULL;
-
-	if (CMD_ARGC < 1)
-		return ERROR_COMMAND_SYNTAX_ERROR;
 	return ERROR_OK;
 }
-
-COMMAND_HANDLER(pn73x_handle_options_read_command)
-{
-	return ERROR_OK;
-}
-
-COMMAND_HANDLER(pn73x_handle_options_write_command)
-{
-	return ERROR_OK;
-}
-
-COMMAND_HANDLER(pn73x_handle_options_load_command)
-{
-	if (CMD_ARGC < 1)
-		return ERROR_COMMAND_SYNTAX_ERROR;
-	return ERROR_OK;
-}
+#endif
 
 static const struct command_registration pn73x_exec_command_handlers[] = {
 /*	Not yet supported
