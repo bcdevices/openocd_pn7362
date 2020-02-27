@@ -61,7 +61,7 @@
 #define PH_ROMHAL_EEPROM_START_PAGE_NUMBER     0
 
 
-#define PH_ROMHAL_FLASH_START_ADDRESS  0x00203000
+#define PH_ROMHAL_FLASH_START_ADDRESS  0x00203000L
 #define PH_ROMHAL_FLASH_END_ADDRESS    (PH_ROMHAL_FLASH_START_ADDRESS + (158*1024) -1)
 #define PH_ROMHAL_FLASH_SIZE    (PH_ROMHAL_FLASH_END_ADDRESS - PH_ROMHAL_FLASH_START_ADDRESS + 1) /* Total Size of the PAGEFLASH = 160 KBytes */
 #define PH_ROMHAL_FLASH_PAGE_SIZE          128 /* FLASH is organized as 1280 pages x 128 bytes = 160KBytes */
@@ -75,6 +75,8 @@
 #define PN73_STACK (PN73_RAM_START+0x2d00)
 #define PN73_BUFFER_SIZE 0x1000
 
+#define PN74_EEPROM_START PH_ROMHAL_EEPROM_DATA_START_ADDRESS
+#define PN74_EEPROM_SIZE  PH_ROMHAL_EEPROM_DATA_SIZE
 #define PN74_FLASH_START PH_ROMHAL_FLASH_START_ADDRESS
 #define PN74_FLASH_SIZE  PH_ROMHAL_FLASH_SIZE
 
@@ -88,7 +90,6 @@
 
 //somewhat redundant 
 struct pn73x_flash_bank {
-	int ppage_size;
 	int probed;
 	uint32_t user_bank_size;
 };
@@ -131,36 +132,71 @@ static int pn73x_protect(struct flash_bank *bank, int set, int first, int last)
 	return ERROR_OK;
 }
 
+#define VERIFY_WRITES 1
+#define VERIFY_RETRIES 3
+
 /* NOTE the count must be multiple of 4 bytes, and address on 4 byte boundary */
 static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 		uint32_t address, uint32_t count)
 {
 	struct target *target = bank->target;
-	uint32_t buffer_size = PN73_BUFFER_SIZE+12;  /* +12 makes the actual target data buffer itself a nice round size (4096 bytes) */
+	uint32_t buffer_size = PN73_BUFFER_SIZE;
 	struct working_area *write_algorithm;
 	struct working_area *source;
 	//uint32_t address = bank->base + offset;
 	struct reg_param reg_params[5];
 	struct armv7m_algorithm armv7m_info;
 	int retval = ERROR_OK;
+	uint32_t retryCount=VERIFY_RETRIES;
+	uint8_t isEEPROM=0;
+	uint32_t stubCodeSize=0;
+	const uint8_t *stubCode=NULL;
+
+	if (address 		  >= PH_ROMHAL_EEPROM_DATA_START_ADDRESS &&
+		address+(count*2) <= PH_ROMHAL_EEPROM_DATA_END_ADDRESS+1){
+		isEEPROM=1;
+	}else
+	if (address 		  >= PH_ROMHAL_FLASH_START_ADDRESS &&
+		address+(count*2) <= PH_ROMHAL_FLASH_END_ADDRESS+1){
+		isEEPROM=0;
+	}else{
+		LOG_ERROR("Bad flash write memory range for this CPU; 0x%08x - 0x%08x\n"
+				  "(can only perform a write to either EEPROM at 0x%08lx-0x%08lx or Code Flash at 0x%08lx-0x%08lx" 
+				  , address,address+(count*2)
+				  ,PH_ROMHAL_EEPROM_DATA_START_ADDRESS,PH_ROMHAL_EEPROM_DATA_END_ADDRESS
+				  ,PH_ROMHAL_FLASH_START_ADDRESS,PH_ROMHAL_FLASH_END_ADDRESS
+				   );
+		return ERROR_FLASH_OPERATION_FAILED;
+	}
 
 
 	static const uint8_t pn73xxxx_flash_write_code[] = 
 	{
-		//Compiled from BCFlashStub project. This does not support async write mode but it wouldn't be too hard to add
-		//the stub could be implemented in assembler much like the other OpenOCD ones, this is not part of basic functionality
-#include "../../../contrib/loaders/flash/pn73xxxx/pn7xxxx.inc"
+#include "../../../contrib/loaders/flash/pn73xxxx/pn7xxxx_Flash.inc"
 	};
 
+	static const uint8_t pn73xxxx_eeprom_write_code[] = 
+	{
+#include "../../../contrib/loaders/flash/pn73xxxx/pn7xxxx_EEPROM.inc"
+	};
+
+	if (isEEPROM){
+		stubCodeSize=sizeof(pn73xxxx_eeprom_write_code);
+		stubCode=pn73xxxx_eeprom_write_code;
+	}else{
+		stubCodeSize=sizeof(pn73xxxx_flash_write_code);
+		stubCode=pn73xxxx_flash_write_code;
+	}
+
 	/* flash write code */
-	if (target_alloc_working_area(target, sizeof(pn73xxxx_flash_write_code),
+	if (target_alloc_working_area(target, stubCodeSize,
 			&write_algorithm) != ERROR_OK) {
 		LOG_WARNING("no working area available, can't do block memory writes");
 		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
 	}
 
 	retval = target_write_buffer(target, write_algorithm->address,
-			sizeof(pn73xxxx_flash_write_code), pn73xxxx_flash_write_code);
+			stubCodeSize, stubCode);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -178,36 +214,77 @@ static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 		}
 	}
 
-	armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
-	armv7m_info.core_mode = ARM_MODE_THREAD;
+	do {
+		armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
+		armv7m_info.core_mode = ARM_MODE_THREAD;
 
-	init_reg_param(&reg_params[0], "r0", 32, PARAM_IN_OUT);	/* flash base (in), status (out) */
-	init_reg_param(&reg_params[1], "r1", 32, PARAM_OUT);	/* count (bytes) */
-	init_reg_param(&reg_params[2], "r2", 32, PARAM_OUT);	/* buffer start */
-	init_reg_param(&reg_params[3], "r3", 32, PARAM_OUT);	/* buffer end */
-	init_reg_param(&reg_params[4], "r4", 32, PARAM_IN_OUT);	/* target address */
+		init_reg_param(&reg_params[0], "r0", 32, PARAM_IN_OUT);	/* flash base (in), status (out) */
+		init_reg_param(&reg_params[1], "r1", 32, PARAM_OUT);	/* count (bytes) */
+		init_reg_param(&reg_params[2], "r2", 32, PARAM_OUT);	/* buffer start */
+		init_reg_param(&reg_params[3], "r3", 32, PARAM_OUT);	/* buffer end */
+		init_reg_param(&reg_params[4], "r4", 32, PARAM_IN_OUT);	/* target address */
 
-	buf_set_u32(reg_params[0].value, 0, 32, PN73_FLASH_REGISTER_BASE);
-	buf_set_u32(reg_params[1].value, 0, 32, count<<1);
-	buf_set_u32(reg_params[2].value, 0, 32, source->address);
-	buf_set_u32(reg_params[3].value, 0, 32, source->address + source->size);
-	buf_set_u32(reg_params[4].value, 0, 32, address);
+		buf_set_u32(reg_params[0].value, 0, 32, PN73_FLASH_REGISTER_BASE);
+		buf_set_u32(reg_params[1].value, 0, 32, count<<1);
+		buf_set_u32(reg_params[2].value, 0, 32, source->address);
+		buf_set_u32(reg_params[3].value, 0, 32, source->address + source->size);
+		buf_set_u32(reg_params[4].value, 0, 32, address);
 
-	armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
-	armv7m_info.core_mode = ARM_MODE_THREAD;
+		armv7m_info.common_magic = ARMV7M_COMMON_MAGIC;
+		armv7m_info.core_mode = ARM_MODE_THREAD;
 
-	retval = target_run_flash_async_algorithm(target, buffer,
-			count/2, 4,	//block count, block size
-			0, NULL,	//mem params
-			5, reg_params, //reg params
-			source->address, source->size,
-			write_algorithm->address, 0,
-			&armv7m_info);
+		retval = target_run_flash_async_algorithm(target, buffer,
+				count/2, 4,	//block count, block size
+				0, NULL,	//mem params
+				5, reg_params, //reg params
+				source->address, source->size,
+				write_algorithm->address, 0,
+				&armv7m_info);
 
-	if (retval == ERROR_FLASH_OPERATION_FAILED) {
-		LOG_ERROR("flash write failed at address 0x%"PRIx32,
-				buf_get_u32(reg_params[4].value, 0, 32));
-	}
+		if (retval == ERROR_FLASH_OPERATION_FAILED) {
+			LOG_ERROR("flash write failed at address 0x%"PRIx32,
+					buf_get_u32(reg_params[4].value, 0, 32));
+		}
+
+		//verify just in case...
+		if (VERIFY_WRITES){
+			uint32_t errors=0;
+			uint32_t sizeBytes=count*2;
+			uint8_t *tmpBuf=malloc( sizeBytes);
+			if (tmpBuf){
+				retval = target_read_buffer(target, address, sizeBytes, tmpBuf);
+				
+				{
+					uint32_t t=0,firstError=0xffffffff;
+					while(t<sizeBytes){
+						if (tmpBuf[t]!=buffer[t]){
+							errors++;
+							if (firstError==0xffffffff) firstError=t;
+						}
+						t++;
+					}
+					if (errors){
+						LOG_ERROR("Verify failed on attempt %d;  %d bytes wrong; first offset 0x%x" , retryCount ,errors,firstError);
+					}else{
+						LOG_INFO("Wrote & verified %d bytes ok" , sizeBytes);
+					}
+				}
+				free(tmpBuf);
+			}else{
+				LOG_ERROR("Couldn't allocate buffer to verify.");
+			}
+
+			if (errors==0){
+				break;	//done ok!
+			}
+
+		}else{
+			break;	//no verify, done
+		}
+
+	}while(--retryCount);
+
+
 
 	destroy_reg_param(&reg_params[0]);
 	destroy_reg_param(&reg_params[1]);
@@ -217,6 +294,7 @@ static int pn73x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 
 	target_free_working_area(target, source);
 	target_free_working_area(target, write_algorithm);
+
 
 	return retval;
 }
@@ -293,20 +371,14 @@ static int pn73x_get_device_id(struct flash_bank *bank, uint32_t *device_id)
 	return retval;
 }
 
-static int pn73x_get_flash_size(struct flash_bank *bank, uint16_t *flash_size_in_kb)
-{
-	*flash_size_in_kb = PN74_FLASH_SIZE/1024;
-	return ERROR_OK;
-}
 
 static int pn73x_probe(struct flash_bank *bank)
 {
 	// This is a bit untidy
 	struct pn73x_flash_bank *pn73x_info = bank->driver_priv;
-	uint16_t flash_size_in_kb;
 	uint32_t device_id;
 	int page_size;
-	uint32_t base_address = PN74_FLASH_START;
+	uint32_t base_address = PH_ROMHAL_EEPROM_DATA_START_ADDRESS;
 	
 	pn73x_info->probed = 0;
 	
@@ -320,30 +392,22 @@ static int pn73x_probe(struct flash_bank *bank)
 
 	switch (device_id & 0xfff) {
 	case 0:
-		page_size = 1024;
-		pn73x_info->ppage_size = 4;
+		page_size = 64;
 		break;
-	
-
 	default:
 		LOG_WARNING("Cannot identify target as a pn73 family.");
 		return ERROR_FAIL;
 	}
-	/* get flash size from target. */
-	retval = pn73x_get_flash_size(bank, &flash_size_in_kb);
-	
-	LOG_INFO("flash size = %dkbytes", flash_size_in_kb);
-	/* did we assign flash size? */
-	assert(flash_size_in_kb != 0xffff);
 
 	/* calculate numbers of pages */
-	int num_pages = flash_size_in_kb * 1024 / page_size;
+	int bank_size=(PH_ROMHAL_FLASH_END_ADDRESS+1) - PH_ROMHAL_EEPROM_DATA_START_ADDRESS;
+	int num_pages = (bank_size+(page_size-1))/page_size;
 
 	/* check that calculation result makes sense */
 	assert(num_pages > 0);
 
 	bank->base = base_address;
-	bank->size = (num_pages * page_size);
+	bank->size = bank_size;
 
 	bank->num_sectors = num_pages;
 	bank->sectors = alloc_block_array(0, page_size, num_pages);
@@ -399,7 +463,7 @@ COMMAND_HANDLER(pn73x_handle_unlock_command)
 #endif
 
 static const struct command_registration pn73x_exec_command_handlers[] = {
-/*	Not yet supported
+/*	Not yet supported - security bits use the first uint32 of EEPROM - careful, can brick the chip.
 	{
 		.name = "lock",
 		.handler = pn73x_handle_lock_command,
