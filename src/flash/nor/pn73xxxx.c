@@ -47,7 +47,6 @@
 
 
 // PN definitions. It has a rom loader that runs first
-// Some varients have half as much Flash (80k), this is defined in the .cfg file not in here
 #define PH_ROMHAL_EEPROM_MEM_START_ADDRESS     0x00201000UL
 #define PH_ROMHAL_EEPROM_USER_START_ADDRESS    (PH_ROMHAL_EEPROM_MEM_START_ADDRESS + 512)
 #define PH_ROMHAL_EEPROM_SECURITY_ROW_ADDRESS  0x00201000UL /* Address of security row in EEPROM */
@@ -378,7 +377,7 @@ static int pn73x_probe(struct flash_bank *bank)
 	struct pn73x_flash_bank *pn73x_info = bank->driver_priv;
 	uint32_t device_id;
 	int page_size;
-	uint32_t base_address = PH_ROMHAL_EEPROM_DATA_START_ADDRESS;
+	uint32_t base_address = PH_ROMHAL_EEPROM_MEM_START_ADDRESS;
 	
 	pn73x_info->probed = 0;
 	
@@ -400,7 +399,7 @@ static int pn73x_probe(struct flash_bank *bank)
 	}
 
 	/* calculate numbers of pages */
-	int bank_size=(PH_ROMHAL_FLASH_END_ADDRESS+1) - PH_ROMHAL_EEPROM_DATA_START_ADDRESS;
+	int bank_size=(PH_ROMHAL_FLASH_END_ADDRESS+1) - PH_ROMHAL_EEPROM_MEM_START_ADDRESS;
 	int num_pages = (bank_size+(page_size-1))/page_size;
 
 	/* check that calculation result makes sense */
