@@ -8,7 +8,7 @@ OBJDUMP=$(CROSS_COMPILE)objdump
 
 CFLAGS = -static -nostartfiles -mlittle-endian -Wa,-EL
 
-all: pn7xxxx.inc
+all: pn7xxxx_Flash.inc pn7xxxx_EEPROM.inc
 
 .PHONY: clean
 
